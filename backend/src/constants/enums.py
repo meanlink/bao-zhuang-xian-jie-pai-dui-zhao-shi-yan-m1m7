@@ -8,3 +8,16 @@ class JobStatus(str, Enum):
     running = 'running'
     completed = 'completed'
     failed = 'failed'
+class ReviewGroupStatus(str, Enum):
+    draft = 'draft'
+    locked = 'locked'
+    running = 'running'
+    computed = 'computed'
+    failed = 'failed'
+    approved = 'approved'
+    published = 'published'
+class ReviewItemStatus(str, Enum):
+    pending = 'pending'
+    running = 'running'
+    completed = 'completed'
+    failed = 'failed'

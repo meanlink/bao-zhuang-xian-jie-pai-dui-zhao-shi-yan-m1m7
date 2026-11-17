@@ -1,0 +1,41 @@
+from sqlalchemy import String, JSON, Double, Float, ForeignKey, Integer, Boolean
+from sqlalchemy.orm import Mapped, mapped_column
+from src.config.database import Base
+class ReviewGroup(Base):
+    __tablename__ = 'review_groups'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    confidence: Mapped[float] = mapped_column(Float, default=.95)
+    alpha: Mapped[float] = mapped_column(Float, default=.05)
+    status: Mapped[str] = mapped_column(String(20), default='draft')
+    spec_fingerprint: Mapped[str] = mapped_column(String(64), default='')
+    error: Mapped[str] = mapped_column(String(1000), default='')
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    brief_filename: Mapped[str] = mapped_column(String(200), default='')
+    brief_checksum: Mapped[str] = mapped_column(String(64), default='')
+    created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    published_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_at: Mapped[float] = mapped_column(Double)
+    locked_at: Mapped[float | None] = mapped_column(Double, nullable=True)
+    approved_at: Mapped[float | None] = mapped_column(Double, nullable=True)
+    published_at: Mapped[float | None] = mapped_column(Double, nullable=True)
+class ReviewItem(Base):
+    __tablename__ = 'review_items'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey('review_groups.id'))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey('datasets.id'))
+    dataset_name: Mapped[str] = mapped_column(String(160), default='')
+    dataset_checksum: Mapped[str] = mapped_column(String(64), default='')
+    shift: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default='pending')
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_adjusted: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_significant: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    adjusted_significant: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(String(1000), default='')
+    started_at: Mapped[float | None] = mapped_column(Double, nullable=True)
+    finished_at: Mapped[float | None] = mapped_column(Double, nullable=True)

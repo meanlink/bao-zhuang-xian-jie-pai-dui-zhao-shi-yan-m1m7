@@ -2,9 +2,10 @@ import time, json
 from sqlalchemy import select, func
 from src.config.database import Session
 from migrations.initial import migrate
-from src.models import User, Dataset, Job, Report, Delivery, Audit
+from src.models import User, Dataset, Job, Report, Delivery, Audit, ReviewGroup, ReviewItem
 from src.services.business import metadata, seed_records, analyze
 from src.services.reports import deliver
+from src.services import reviews
 from src.utils.security import hash_password
 from src.utils.serialization import checksum
 def seed():
@@ -31,8 +32,32 @@ def seed():
             r=Report(name='每日业务复核简报',job_id=j.id,destination='业务复核组 · 本地收件箱',interval_seconds=86400,next_run=time.time()+86400,enabled=True)
             db.add(r);db.flush();deliver(db,r)
             db.add(Audit(actor='seed',action='demo.baseline',detail={'dataset':d.id},at=time.time()))
+        if not db.scalar(select(ReviewGroup).where(ReviewGroup.name=='班次改善成组评审')):
+            analyst=db.scalar(select(User).where(User.role=='analyst'))
+            admin=db.scalar(select(User).where(User.role=='admin'))
+            g=ReviewGroup(name='班次改善成组评审',confidence=.95,alpha=.05,status='draft',created_by=analyst.id,created_at=time.time()-600)
+            db.add(g);db.flush()
+            for position,shift in enumerate(['早班','晚班']):
+                db.add(ReviewItem(group_id=g.id,position=position,dataset_id=d.id,dataset_name=d.name,dataset_checksum=d.checksum,shift=shift,status='pending'))
+            db.flush()
+            reviews.lock(db,g.id,analyst)
+            db.add(Audit(actor='seed',action='demo.review_group',detail={'group':g.id,'items':2},at=time.time()))
+            group_id=g.id
+        else:
+            group_id=None
         db.commit()
-        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in [User,Dataset,Job,Report,Delivery,Audit]}
+        if group_id:
+            # 独立会话按锁定的原成员执行、整组批准并发布，演示校正前后的完整依据。
+            reviews.process_group(group_id)
+            with Session() as worker_db:
+                seeded=worker_db.get(ReviewGroup,group_id)
+                admin=worker_db.scalar(select(User).where(User.role=='admin'))
+                if seeded and seeded.status=='computed' and admin:
+                    reviews.approve(worker_db,group_id,admin)
+                    worker_db.commit()
+                    reviews.publish(worker_db,group_id,admin)
+                    worker_db.commit()
+        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in [User,Dataset,Job,Report,Delivery,Audit,ReviewGroup,ReviewItem]}
         print(json.dumps(counts,ensure_ascii=False))
         return counts
 if __name__=='__main__':seed()

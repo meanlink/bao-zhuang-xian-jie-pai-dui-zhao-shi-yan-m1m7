@@ -1,4 +1,4 @@
-"""包装节拍对照实验：异方差 Welch t 与均值差区间。"""
+"""包装节拍对照实验：异方差 Welch t、均值差区间与成组 Holm 校正。"""
 import math
 import random
 import numpy as np
@@ -7,12 +7,15 @@ from scipy import stats
 
 def metadata():
     return {"name": "包装线节拍对照实验", "short": "pack-welch", "tagline": "把工艺调整的节拍差，放进可复查的实验区间。", "client": "榆川包装 · 52 人食品外包装车间，工艺组比较两种封装动作", "workflow": "工艺员用秒表登记每段节拍，把两列平均值截图交给生产经理。", "pains": ["忽略两组方差差异", "只报改善秒数没有不确定区间", "班次混杂未单独观察"], "upstream": "随机分配试运行片段 YC_pack_trial.csv", "downstream": "工艺经理决定是否继续扩大试验",
-            "entities": ["实验片段", "节拍比较", "工艺评审简报"], "dataset_name": "A 原动作 / B 改动作 · 160 段观测",
+            "entities": ["实验片段", "节拍比较", "成组评审", "工艺评审简报"], "dataset_name": "A 原动作 / B 改动作 · 160 段观测",
             "columns": [{"key": "run", "label": "片段", "type": "string"}, {"key": "arm", "label": "实验组", "type": "string"}, {"key": "shift", "label": "班次", "type": "string"}, {"key": "seconds", "label": "单件节拍/秒", "type": "number"}],
             "parameters": [{"key": "confidence", "label": "区间置信度", "type": "select", "default": "0.95", "options": [{"value": str(v), "label": f"{v*100:g}%"} for v in [.9, .95, .99]]}, {"key": "shift", "label": "实验班次", "type": "select", "default": "全部", "options": [{"value": n, "label": n} for n in ["全部", "早班", "晚班"]]}],
             "workbench_title": "节拍效果核验", "action_label": "执行 Welch 比较", "unit": "秒", "accent": "oklch(58% 0.16 69)", "style": "industrial",
             "seed_story": ["08:20 工艺员导入 YC_pack_trial.csv，A/B 各 80 段。", "08:30 核查片段按班次交错随机分配。", "08:40 分析员选择 95% 置信度和全部班次。", "08:45 执行 Welch 检验，查看 A−B 改善秒数。", "09:00 检查置信区间是否跨 0。", "09:20 改为晚班重算，查看异方差影响。", "09:45 导出工艺评审简报，交经理安排扩大试验。"],
-            "method": "改善量=均值(A)−均值(B)；SE=√(sA²/nA+sB²/nB)；Welch–Satterthwaite 自由度；双侧 t 检验和 t 分布置信区间；Cohen d 用合并标准差。", "limitations": ["假定观测片段近似独立", "未校正多个班次的探索性比较", "显著节拍差不能证明成品质检合格"]}
+            "method": "改善量=均值(A)−均值(B)；SE=√(sA²/nA+sB²/nB)；Welch–Satterthwaite 自由度；双侧 t 检验和 t 分布置信区间；Cohen d 用合并标准差。",
+            "group_method": "成组评审把同一批评审项作为一个检验家族：各项独立执行 Welch 比较，锁定后成员不可增删或换样本；先按原始双侧 p 值升序排序，再以 Holm–Bonferroni 逐步校正（第 k 小的 p 乘以 m−k+1 并取累计最大值）。只有校正后 p≤家族误报上限 α 的项才判为显著；任一项失败整组保持失败、不得剔除，全部成功后才共同发布校正结论。",
+            "group_review": {"alpha_options": ["0.01", "0.05", "0.10"], "default_alpha": "0.05", "shifts": ["早班", "晚班"], "min_items": 2, "max_items": 20, "rule": "组内原始显著性不可单独批准或分发；简报保留整组依据。"},
+            "limitations": ["假定观测片段近似独立", "单次独立比较未校正多重检验；多班次结论请使用成组评审的 Holm 校正", "显著节拍差不能证明成品质检合格"]}
 
 
 def seed_records():
@@ -25,7 +28,7 @@ def seed_records():
     return rows
 
 
-def analyze(records, params):
+def _params(params):
     try:
         confidence = float(params.get("confidence", .95))
     except (TypeError, ValueError):
@@ -35,6 +38,10 @@ def analyze(records, params):
     shift = str(params.get("shift", "全部"))
     if shift not in ("全部", "早班", "晚班"):
         raise ValueError("未知班次")
+    return confidence, shift
+
+
+def _groups(records, shift):
     groups = {"A": [], "B": []}
     seen = set()
     for r in records:
@@ -51,6 +58,22 @@ def analyze(records, params):
     if min(map(len, groups.values())) < 3:
         raise ValueError("每组至少需要 3 个独立实验片段")
     a, b = np.array(groups["A"]), np.array(groups["B"])
+    if float(a.var(ddof=1)) / len(a) + float(b.var(ddof=1)) / len(b) <= 1e-15:
+        raise ValueError("两组均无变异，Welch 检验无法估计误差")
+    return a, b
+
+
+def preflight_member(records, shift):
+    """锁定前只核对可估计性，不返回任何 p 值或均值，避免开算前偷看结论。"""
+    if shift not in ("早班", "晚班"):
+        raise ValueError("成组评审项只接受早班或晚班")
+    _groups(records, shift)
+    return True
+
+
+def analyze(records, params):
+    confidence, shift = _params(params)
+    a, b = _groups(records, shift)
     na, nb = len(a), len(b)
     ma, mb, va, vb = float(a.mean()), float(b.mean()), float(a.var(ddof=1)), float(b.var(ddof=1))
     se2 = va / na + vb / nb
@@ -64,9 +87,27 @@ def analyze(records, params):
     low, high = diff - margin, diff + margin
     pooled = math.sqrt(((na - 1) * va + (nb - 1) * vb) / (na + nb - 2))
     effect = diff / pooled
-    rows = [{"arm": k, "n": len(groups[k]), "mean": round(float(np.mean(groups[k])), 4), "sd": round(float(np.std(groups[k], ddof=1)), 4)} for k in ("A", "B")]
+    rows = [{"arm": k, "n": len(values), "mean": round(float(np.mean(values)), 4), "sd": round(float(np.std(values, ddof=1)), 4)} for k, values in (("A", a), ("B", b))]
     return {"summary": f"B 相对 A 平均节拍缩短 {diff:.3f} 秒；{confidence*100:g}% 区间为 [{low:.3f}, {high:.3f}] 秒。",
             "metrics": [{"label": "改善量 A−B", "value": round(diff, 5), "unit": "秒"}, {"label": "双侧 p 值", "value": float(f"{p:.6g}")}, {"label": "Cohen d", "value": round(effect, 5)}, {"label": "Welch 自由度", "value": round(df, 3)}],
             "table": {"columns": [{"key": "arm", "label": "实验组"}, {"key": "n", "label": "片段数"}, {"key": "mean", "label": "均值/秒"}, {"key": "sd", "label": "样本标准差/秒"}], "rows": rows},
             "chart": {"type": "bar", "labels": ["A 原动作", "B 改动作"], "series": [{"name": "平均单件节拍/秒", "values": [round(ma, 4), round(mb, 4)]}]},
-            "findings": [f"区间下界 {low:.4f} 秒，上界 {high:.4f} 秒；{'区间未跨 0' if low > 0 or high < 0 else '区间跨 0'}。", f"t={statistic:.4f}，自由度={df:.3f}；分析班次：{shift}。", "仅在分组随机、片段独立的前提下支持实验推断；扩大试验仍须核查质检指标。"], "method": metadata()["method"], "warnings": ["班次子组比较为探索性分析，未调整多重检验。"]}
+            "findings": [f"区间下界 {low:.4f} 秒，上界 {high:.4f} 秒；{'区间未跨 0' if low > 0 or high < 0 else '区间跨 0'}。", f"t={statistic:.4f}，自由度={df:.3f}；分析班次：{shift}。", "仅在分组随机、片段独立的前提下支持实验推断；扩大试验仍须核查质检指标。"], "method": metadata()["method"], "warnings": ["班次子组比较为探索性分析；成组结论请使用 Holm 校正后的判定。"],
+            "stats": {"p_value": p, "diff": diff, "low": low, "high": high, "df": df, "effect": effect, "n_a": na, "n_b": nb, "mean_a": ma, "mean_b": mb}}
+
+
+def holm_adjust(p_values, alpha):
+    """Holm–Bonferroni 逐步校正；返回与输入等长的校正 p 与显著标记。"""
+    m = len(p_values)
+    if m == 0:
+        return {"adjusted": [], "significant": []}
+    if alpha <= 0 or alpha >= 1:
+        raise ValueError("家族误报上限须在 0 与 1 之间")
+    order = sorted(range(m), key=lambda i: (float(p_values[i]), i))
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, index in enumerate(order):
+        value = min(1.0, (m - rank) * float(p_values[index]))
+        running = max(running, value)
+        adjusted[index] = running
+    return {"adjusted": adjusted, "significant": [value <= alpha + 1e-12 for value in adjusted]}
